@@ -339,15 +339,18 @@ class BasePredictor:
 
                 # Visualize, save, write results
                 n = len(im0s)
-                for i in range(n):
-                    self.seen += 1
-                    self.results[i].speed = {
-                        "preprocess": profilers[0].dt * 1e3 / n,
-                        "inference": profilers[1].dt * 1e3 / n,
-                        "postprocess": profilers[2].dt * 1e3 / n,
-                    }
-                    if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
-                        s[i] += self.write_results(i, Path(paths[i]), im, s)
+                try:
+                    for i in range(n):
+                        self.seen += 1
+                        self.results[i].speed = {
+                            "preprocess": profilers[0].dt * 1e3 / n,
+                            "inference": profilers[1].dt * 1e3 / n,
+                            "postprocess": profilers[2].dt * 1e3 / n,
+                        }
+                        if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
+                            s[i] += self.write_results(i, Path(paths[i]), im, s)
+                except StopIteration:
+                    break
 
                 # Print batch results
                 if self.args.verbose:
@@ -360,6 +363,9 @@ class BasePredictor:
         for v in self.vid_writer.values():
             if isinstance(v, cv2.VideoWriter):
                 v.release()
+
+        if self.args.show:
+            cv2.destroyAllWindows()  # close any open windows
 
         # Print final results
         if self.args.verbose and self.seen:
@@ -388,14 +394,13 @@ class BasePredictor:
             dnn=self.args.dnn,
             data=self.args.data,
             fp16=self.args.half,
-            batch=self.args.batch,
             fuse=True,
             verbose=verbose,
         )
 
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
-        if hasattr(self.model, "imgsz"):
+        if hasattr(self.model, "imgsz") and not getattr(self.model, "dynamic", False):
             self.args.imgsz = self.model.imgsz  # reuse imgsz from export metadata
         self.model.eval()
 
@@ -446,16 +451,16 @@ class BasePredictor:
         if self.args.show:
             self.show(str(p))
         if self.args.save:
-            self.save_predicted_images(str(self.save_dir / p.name), frame)
+            self.save_predicted_images(self.save_dir / p.name, frame)
 
         return string
 
-    def save_predicted_images(self, save_path: str = "", frame: int = 0):
+    def save_predicted_images(self, save_path: Path, frame: int = 0):
         """
         Save video predictions as mp4 or images as jpg at specified path.
 
         Args:
-            save_path (str): Path to save the results.
+            save_path (Path): Path to save the results.
             frame (int): Frame number for video mode.
         """
         im = self.plotted_img
@@ -463,7 +468,7 @@ class BasePredictor:
         # Save videos and streams
         if self.dataset.mode in {"stream", "video"}:
             fps = self.dataset.fps if self.dataset.mode == "video" else 30
-            frames_path = f"{save_path.split('.', 1)[0]}_frames/"
+            frames_path = self.save_dir / f"{save_path.stem}_frames"  # save frames to a separate directory
             if save_path not in self.vid_writer:  # new video
                 if self.args.save_frames:
                     Path(frames_path).mkdir(parents=True, exist_ok=True)
@@ -478,11 +483,11 @@ class BasePredictor:
             # Save video
             self.vid_writer[save_path].write(im)
             if self.args.save_frames:
-                cv2.imwrite(f"{frames_path}{frame}.jpg", im)
+                cv2.imwrite(f"{frames_path}/{save_path.stem}_{frame}.jpg", im)
 
         # Save images
         else:
-            cv2.imwrite(str(Path(save_path).with_suffix(".jpg")), im)  # save to JPG for best support
+            cv2.imwrite(str(save_path.with_suffix(".jpg")), im)  # save to JPG for best support
 
     def show(self, p: str = ""):
         """Display an image in a window."""
@@ -492,7 +497,8 @@ class BasePredictor:
             cv2.namedWindow(p, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)  # allow window resize (Linux)
             cv2.resizeWindow(p, im.shape[1], im.shape[0])  # (width, height)
         cv2.imshow(p, im)
-        cv2.waitKey(300 if self.dataset.mode == "image" else 1)  # 1 millisecond
+        if cv2.waitKey(300 if self.dataset.mode == "image" else 1) & 0xFF == ord("q"):  # 300ms if image; else 1ms
+            raise StopIteration
 
     def run_callbacks(self, event: str):
         """Run all registered callbacks for a specific event."""
